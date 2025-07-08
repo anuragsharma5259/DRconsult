@@ -7,14 +7,12 @@ import stripe from "stripe";
 import { v2 as cloudinary } from "cloudinary";
 import doctorModel from '../models/doctorModel.js'
 import appointmentModel from '../models/appointmentModel.js'
+import OtpModel from "../models/otpModel.js";
 
 import nodemailer from 'nodemailer';
 
 const stripeInstance = new stripe(process.env.STRIPE_SECRET_KEY)
 
-
-
-const OTPs = {}; // In-memory temporary store
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -27,14 +25,22 @@ const transporter = nodemailer.createTransport({
 
 
 
+
+
 const sendOTP = async (req, res) => {
   try {
     const { email } = req.body;
-
     if (!email) return res.json({ success: false, message: "Email required" });
 
-    const otp = Math.floor(100000 + Math.random() * 900000);
-    OTPs[email] = { otp, expiry: Date.now() + 5 * 60 * 1000 };
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiry = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+    // Remove old OTP for the same email
+    await OtpModel.deleteMany({ email });
+
+    // Save new OTP
+    const otpDoc = new OtpModel({ email, otp, expiry });
+    await otpDoc.save();
 
     await transporter.sendMail({
       from: process.env.EMAIL_USER,
@@ -57,20 +63,24 @@ const verifyAndRegisterUser = async (req, res) => {
   try {
     const { name, email, password, otp } = req.body;
 
-    const record = OTPs[email];
-    if (!record || record.otp != otp || Date.now() > record.expiry) {
+    const otpRecord = await OtpModel.findOne({ email }).sort({ createdAt: -1 });
+
+    if (!otpRecord || otpRecord.otp !== otp || otpRecord.expiry < new Date()) {
       return res.json({ success: false, message: "Invalid or expired OTP" });
     }
-    delete OTPs[email];
 
-    // Email + password validation
+    // Delete OTP after verification
+    await OtpModel.deleteMany({ email });
+
+    // Validation
     if (!validator.isEmail(email)) return res.json({ success: false, message: "Invalid email" });
     if (password.length < 8) return res.json({ success: false, message: "Password too weak" });
 
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+    // Check if user already exists
+    const existingUser = await userModel.findOne({ email });
+    if (existingUser) return res.json({ success: false, message: "User already registered" });
 
+    const hashedPassword = await bcrypt.hash(password, 10);
     const newUser = new userModel({
       name,
       email,
@@ -80,7 +90,6 @@ const verifyAndRegisterUser = async (req, res) => {
 
     await newUser.save();
 
-    // Welcome mail
     await transporter.sendMail({
       from: process.env.EMAIL_USER,
       to: email,
@@ -89,13 +98,13 @@ const verifyAndRegisterUser = async (req, res) => {
     });
 
     const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET);
-
     res.json({ success: true, message: "User verified and registered", token });
   } catch (error) {
     console.log(error);
     res.json({ success: false, message: error.message });
   }
 };
+
 
 
 
